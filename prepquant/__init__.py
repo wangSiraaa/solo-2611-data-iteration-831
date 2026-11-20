@@ -16,6 +16,29 @@ from .expr import LinExpr
 from .ledger import Ledger, LedgerError, Product, product_from_payload
 from .lp import Infeasible, Unbounded, SolverError
 from .vault import Vault, VaultError
+from .wetmass import WetMassBook, WetMassError, replay_wet_mass
+from .bottles import (
+    BottleError,
+    BottleLoadManifest,
+    BottleType,
+    FillState,
+    ManifestBuilder,
+    fill_bottle,
+    manifest_from_loads,
+    read_manifest,
+)
+from .rack import (
+    BottlePlacement,
+    Condition,
+    Hole,
+    Rack,
+    RackError,
+    RackSolution,
+    Weight,
+    placements_from_manifest,
+    solve_across_racks,
+    solve_rack,
+)
 
 __all__ = [
     "q",
@@ -31,4 +54,28 @@ __all__ = [
     "Infeasible",
     "Unbounded",
     "SolverError",
+    # wet mass (entry point 1, part a)
+    "WetMassBook",
+    "WetMassError",
+    "replay_wet_mass",
+    # bottle load manifest (entry point 1, part b)
+    "BottleError",
+    "BottleLoadManifest",
+    "BottleType",
+    "FillState",
+    "ManifestBuilder",
+    "fill_bottle",
+    "manifest_from_loads",
+    "read_manifest",
+    # rack counterweight (entry point 2)
+    "BottlePlacement",
+    "Condition",
+    "Hole",
+    "Rack",
+    "RackError",
+    "RackSolution",
+    "Weight",
+    "placements_from_manifest",
+    "solve_across_racks",
+    "solve_rack",
 ]

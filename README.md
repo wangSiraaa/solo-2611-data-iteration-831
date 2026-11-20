@@ -11,19 +11,49 @@ prepquant/
   lp.py         # 精确两阶段单纯形（Bland 规则）
   ledger.py     # 配液账：有序原子批、来源账本、产品版本、更正重放
   vault.py      # 定量仓：测量导入、联合线性区间约束、精确端点
+  wetmass.py    # 湿质量账：按剩余总湿质量比例转移、密度随手重算（离线模型入口一）
+  bottles.py    # 瓶型/装液/竖向一阶矩 + 版本化瓶载荷清单（离线模型入口一）
+  rack.py       # 周转架配重：离散孔位、最小新增质量、极端参数落点（离线模型入口二）
   scenarios.py  # 合成场景生成器（含手算真值）
   demo.py       # 端到端演示脚本（写 out/）
+  demo_offline.py # 离线留样/配重演示（写 out/offline/）
   cli.py        # 命令行
-tests/          # pytest（30 项）
+tests/          # pytest（68 项）
 ```
 
 ## 运行
 
 ```bash
-python3 -m prepquant.demo          # 全流程演示 + 手算核对，写 out/demo_report.json
-python3 -m pytest -q               # 单元/CLI 测试
+python3 -m prepquant.demo           # 全流程演示 + 手算核对，写 out/demo_report.json
+python3 -m prepquant.demo_offline   # 离线留样瓶/周转架演示，写 out/offline/
+python3 -m pytest -q                # 单元/CLI 测试
 python3 -m prepquant.scenarios --out out/scenarios.json   # 仅生成场景
 ```
+
+## 离线留样瓶模型（与配液账并列的第二个入口）
+
+留样批要复算周转架的摆法，需要一条**与溶质质量无关**的湿质量账，以及一个
+只通过“导出瓶载荷清单”耦合的配重求解器。二者互不读对方私有状态，也都不改
+动原有溶质回算：
+
+* **湿质量账 `wetmass.py`**：为各原始液体、补入溶剂分别给每单位体积的湿质量
+  （密度）。源液每步已混匀，转移从**剩余总湿质量**按体积比例带走，混合后再由
+  实际余量重算下一次转移的密度。支持建样/转移/混合/加溶剂/弃置；蒸发对留样批
+  不定义，直接拒绝而不臆测。溶质质量式（mg）是另一本账，二者互不影响。
+* **瓶载荷 `bottles.py`**：瓶型是自底向上的连通直立内腔串（各段高度 + 常数
+  水平截面积），另有空瓶质量与其重心高度。装液自底段起填，满到段界只填一次；
+  超容拒绝。输出液面高度、总湿质量、液体与瓶壳合计的竖向一阶矩。结果写成
+  **版本化瓶载荷清单**：换瓶型产生新版本，`previous` 记旧版本的版本号与内容
+  哈希，旧版可独立复查；清单是纯 JSON，可脱离本代码读回（`read_manifest`）。
+* **周转架 `rack.py`**：固定瓶位与配重孔各有水平位置与相对架面高度，瓶载荷整体
+  置于对应瓶位。物件在参数 k 下的合力落点为 `(H + k·V) / M`（H、V、M 分别为
+  总水平质量矩、总竖向质量矩、总质量）。工况给出接触边界 `[a,b]` 与倾斜参数
+  闭区间；因 M 与布局无关、落点对 k 线性，只需校验区间两端即精确。各配重只能
+  进各自允许的空孔，一孔一块，一次运输共用一份摆法。求解按新增质量最小做精确
+  深度优先枚举（≤8 孔、≤8 块），无解则如实报告。
+
+`python3 -m prepquant.cli bottle-load spec.json --out m.json [--previous m_old.json]`
+生成/更正清单，`manifest-show` 独立读回，`rack-solve spec.json` 从清单求解。
 
 ## 模型与表示
 
@@ -62,6 +92,10 @@ python3 -m prepquant.cli --ledger lab.db --vault lab.vault.db \
 python3 -m prepquant.cli --ledger lab.db --vault lab.vault.db show-analysis a1  # 历史结果
 python3 -m prepquant.cli --ledger lab.db correct 3 fix.json --note "wrong top-up"
 python3 -m prepquant.cli --ledger lab.db log | corrections | consumed | containers
+# 离线留样瓶 / 周转架（只经“瓶载荷清单”耦合，不碰台账/定量仓私有表）
+python3 -m prepquant.cli --ledger lab.db bottle-load load.json --out m.json [--previous m_old.json]
+python3 -m prepquant.cli --ledger lab.db manifest-show m.json                   # 独立读回清单
+python3 -m prepquant.cli --ledger lab.db rack-solve rack.json                   # 最小新增配重
 ```
 
 操作 JSON 为对象列表，`op` 取 `standard / sample / transfer / mix / solvent /

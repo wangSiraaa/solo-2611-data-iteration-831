@@ -76,8 +76,16 @@ def run_analysis(ledger, vault, scenario, analysis_name, override_bounds=None):
 
 def demo() -> dict:
     if OUT.exists():
-        shutil.rmtree(OUT)
-    OUT.mkdir(parents=True)
+        # Keep the independent offline demo's artifacts (out/offline) intact;
+        # this demo owns everything else under out/.
+        for entry in OUT.iterdir():
+            if entry.name == "offline":
+                continue
+            if entry.is_dir():
+                shutil.rmtree(entry)
+            else:
+                entry.unlink()
+    OUT.mkdir(parents=True, exist_ok=True)
     report = {"scenarios": [], "checks": []}
     scenarios = all_scenarios()
 

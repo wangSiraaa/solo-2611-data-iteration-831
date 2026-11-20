@@ -20,9 +20,27 @@ import json
 import sys
 from pathlib import Path
 
+from .bottles import (
+    BottleError,
+    BottleLoadManifest,
+    BottleType,
+    ManifestBuilder,
+    read_manifest,
+)
 from .ledger import Ledger, LedgerError
+from .rack import (
+    BottlePlacement,
+    Condition,
+    Rack,
+    RackError,
+    Weight,
+    placements_from_manifest,
+    solve_across_racks,
+    solve_rack,
+)
 from .rational import q, qstr
 from .vault import Vault, VaultError
+from .wetmass import WetMassBook, WetMassError
 
 
 def _load_ops(path: str | None) -> list[dict]:
@@ -86,6 +104,119 @@ def _print_analysis(r: dict) -> None:
             print(f"      at max other samples: {r['endpoint_points'][u]['max']}")
 
 
+def _load_json(path: str) -> dict:
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"cannot read JSON from {path}: {exc}")
+
+
+def _bottle_from_spec(spec: dict) -> BottleType:
+    return BottleType.build(
+        spec["name"],
+        spec["chambers"],
+        shell_mass=spec.get("shell_mass", 0),
+        shell_cg_height=spec.get("shell_cg_height", 0),
+    )
+
+
+def _run_bottle_load(args) -> int:
+    spec = _load_json(args.spec)
+    operations = spec.get("operations", [])
+    densities = spec.get("densities", {})
+    solvent_density = spec.get("solvent_density", "1")
+    fills = spec["fills"]  # {container: {bottle: <spec>, wet_mass, wet_density?}}
+
+    book = WetMassBook.replay(operations, densities, solvent_density)
+    if args.previous:
+        builder = ManifestBuilder.resume(BottleLoadManifest.load(args.previous))
+    else:
+        builder = ManifestBuilder()
+    for cid, fill in fills.items():
+        bottle = _bottle_from_spec(fill["bottle"])
+        wet_mass = fill.get("wet_mass")
+        wet_density = fill.get("wet_density")
+        if wet_mass is None:
+            wet_mass = book.wet_mass(cid)
+        if wet_density is None:
+            wet_density = book.density(cid) or "1"
+        builder.add(cid, bottle, wet_mass, wet_density)
+    manifest = builder.build(note=args.note)
+    payload = manifest.save(args.out)
+    print(
+        f"manifest v{payload['version']} ({payload['manifest_hash']}) written to {args.out}: "
+        f"{len(payload['bottles'])} bottle(s)"
+    )
+    _print(payload)
+    return 0
+
+
+def _run_manifest_show(args) -> int:
+    payload = _load_json(args.file)
+    parsed = read_manifest(payload)
+    view = {
+        "format": parsed["format"],
+        "version": parsed["version"],
+        "previous": parsed["previous"],
+        "manifest_hash": parsed["manifest_hash"],
+        "bottles": {
+            cid: {
+                "bottle_type": entry["bottle_type"],
+                "total_mass": qstr(entry["load"]["total_mass"]),
+                "total_moment": qstr(entry["load"]["total_moment"]),
+                "liquid_wet_mass": qstr(entry["load"]["liquid_wet_mass"]),
+                "liquid_level": qstr(entry["load"]["liquid_level"]),
+            }
+            for cid, entry in parsed["bottles"].items()
+        },
+    }
+    _print(view)
+    return 0
+
+
+def _run_rack_solve(args) -> int:
+    spec = _load_json(args.spec)
+    if "racks" in spec:
+        rack_specs = spec["racks"]
+    else:
+        rack_specs = [spec]  # single-rack convenience form
+    racks = [
+        Rack.build(
+            r.get("name", f"rack{i+1}"),
+            r["holes"],
+            frame_mass=r.get("frame_mass", 0),
+            frame_moment_x=r.get("frame_moment_x", 0),
+            frame_moment_z=r.get("frame_moment_z", 0),
+        )
+        for i, r in enumerate(rack_specs)
+    ]
+    if "manifest" in spec:
+        manifest_path = Path(spec["manifest"])
+        if not manifest_path.is_absolute() and not manifest_path.exists():
+            # resolve relative to the spec file for convenience
+            candidate = Path(args.spec).resolve().parent / manifest_path
+            if candidate.exists():
+                manifest_path = candidate
+        manifest_payload = _load_json(str(manifest_path))
+        manifest = read_manifest(manifest_payload)
+        placements = placements_from_manifest(manifest, spec["positions"])
+    else:
+        placements = [BottlePlacement.build(**p) for p in spec["placements"]]
+    weights = [
+        Weight(w["name"], q(w["mass"], "weight.mass"), tuple(w.get("allowed_holes", ())))
+        for w in spec.get("weights", [])
+    ]
+    conditions = [
+        Condition.build(c["name"], c["k_lo"], c["k_hi"], c["a"], c["b"])
+        for c in spec["conditions"]
+    ]
+    if len(racks) == 1:
+        _print(solve_rack(racks[0], placements, weights, conditions).to_payload())
+    else:
+        _print(solve_across_racks(racks, placements, weights, conditions))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="prepquant", description="Exact dilution ledger and quantitation vault")
     p.add_argument("--ledger", default="ledger.db", help="preparation ledger SQLite file")
@@ -135,6 +266,27 @@ def build_parser() -> argparse.ArgumentParser:
     p_show = sub.add_parser("show-analysis", help="show a stored analysis result")
     p_show.add_argument("name")
     sub.add_parser("analyses", help="list stored analyses")
+
+    # -- offline retention model, entry point 1: bottle load manifest --------
+    p_load = sub.add_parser(
+        "bottle-load",
+        help="replay wet mass and emit/revise a versioned bottle-load manifest",
+    )
+    p_load.add_argument("spec", help="JSON load spec (operations, densities, bottles)")
+    p_load.add_argument("--out", required=True, help="write the manifest JSON here")
+    p_load.add_argument("--previous", help="previous manifest JSON to revise")
+    p_load.add_argument("--note", help="note recorded on the new manifest version")
+
+    p_mshow = sub.add_parser("manifest-show", help="read a bottle-load manifest back")
+    p_mshow.add_argument("file", help="manifest JSON to read")
+
+    # -- offline retention model, entry point 2: rack counterweights ---------
+    p_rack = sub.add_parser(
+        "rack-solve",
+        help="find the minimum-added-mass counterweight layout for a rack",
+    )
+    p_rack.add_argument("spec", help="JSON rack spec (rack, placements/manifest, weights, conditions)")
+
     return p
 
 
@@ -256,7 +408,16 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "analyses":
             _print(vault.list_analyses())
             return 0
-    except (LedgerError, VaultError) as exc:
+
+        if args.command == "bottle-load":
+            return _run_bottle_load(args)
+
+        if args.command == "manifest-show":
+            return _run_manifest_show(args)
+
+        if args.command == "rack-solve":
+            return _run_rack_solve(args)
+    except (LedgerError, VaultError, WetMassError, BottleError, RackError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     raise SystemExit(f"unhandled command {args.command}")
